@@ -23,6 +23,7 @@ from config.settings import settings
 from guardrails.pii_guard import get_guardrail
 from ingest.document_ingester import ingest_file, ingest_text
 from rag.rag_chain import run_rag_query
+from agent.agent_chain import run_agentic_query
 from vectordb.chroma_store import get_chroma_store
 
 logging.basicConfig(
@@ -53,6 +54,18 @@ class QueryResponse(BaseModel):
 class IngestTextRequest(BaseModel):
     text: str = Field(..., min_length=10)
     source_name: str = Field("manual_input")
+
+
+class AgentQueryRequest(BaseModel):
+    query: str = Field(..., min_length=1, max_length=2000)
+    apply_guardrails: bool = Field(True)
+
+
+class AgentQueryResponse(BaseModel):
+    answer: str
+    sanitized_query: str
+    tool_calls: list[dict]
+    guardrails: dict
 
 
 class HealthResponse(BaseModel):
@@ -140,6 +153,34 @@ async def query(request: QueryRequest):
         source_documents=result.source_documents,
         retrieved_chunks=result.retrieved_chunks,
         retrieval_scores=result.retrieval_scores,
+        guardrails={
+            "input_pii_detected": result.input_pii_detected,
+            "input_pii_entities": result.input_pii_entities,
+            "output_pii_detected": result.output_pii_detected,
+            "output_pii_entities": result.output_pii_entities,
+        },
+    )
+
+
+@app.post("/agent/query", response_model=AgentQueryResponse, tags=["Agentic RAG"])
+async def agent_query(request: AgentQueryRequest):
+    """
+    Agentic RAG query. The LLM decides which tools to call:
+    search_knowledge_base, web_search, or get_current_date.
+    Falls back to web search when the local knowledge base has no relevant results.
+    """
+    if not request.query.strip():
+        raise HTTPException(status_code=400, detail="Query cannot be empty.")
+
+    result = run_agentic_query(
+        user_query=request.query,
+        apply_guardrails=request.apply_guardrails,
+    )
+
+    return AgentQueryResponse(
+        answer=result.answer,
+        sanitized_query=result.sanitized_query,
+        tool_calls=result.tool_calls,
         guardrails={
             "input_pii_detected": result.input_pii_detected,
             "input_pii_entities": result.input_pii_entities,

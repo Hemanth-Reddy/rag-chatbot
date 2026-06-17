@@ -23,11 +23,14 @@ st.caption("Retrieval-Augmented Generation with PII Guardrails")
 with st.sidebar:
     st.header("⚙️ Settings")
 
+    agentic_mode = st.toggle("Agentic Mode", value=False, help="LLM picks tools: KB search + web search + date")
     apply_guardrails = st.toggle("PII Guardrails", value=True)
-    top_k = st.slider("Chunks to retrieve", min_value=1, max_value=10, value=5)
+    top_k = st.slider("Chunks to retrieve", min_value=1, max_value=10, value=5, disabled=agentic_mode)
     score_threshold = st.slider(
-        "Relevance threshold", min_value=0.0, max_value=1.0, value=0.3, step=0.05
+        "Relevance threshold", min_value=0.0, max_value=1.0, value=0.3, step=0.05, disabled=agentic_mode
     )
+    if agentic_mode:
+        st.info("Agentic: LLM searches KB, web, and date as needed.")
 
     st.divider()
 
@@ -59,26 +62,50 @@ with st.sidebar:
 
     st.divider()
 
-    # ── Ingest text ────────────────────────────────────────────────
-    st.header("📥 Ingest Text")
-    ingest_text = st.text_area("Paste text to add to knowledge base", height=100)
-    ingest_source = st.text_input("Source name", value="manual_input")
-    if st.button("Ingest"):
-        if ingest_text.strip():
-            try:
-                resp = requests.post(
-                    f"{API_URL}/ingest/text",
-                    json={"text": ingest_text, "source_name": ingest_source},
-                    timeout=30,
-                )
-                if resp.status_code == 200:
-                    st.success(f"Ingested {resp.json()['chunks_created']} chunks!")
-                else:
-                    st.error("Ingest failed")
-            except Exception as e:
-                st.error(f"Error: {e}")
-        else:
-            st.warning("Please enter some text first.")
+    # ── Ingest ─────────────────────────────────────────────────────
+    st.header("📥 Ingest")
+    ingest_tab, text_tab = st.tabs(["File", "Text"])
+
+    with ingest_tab:
+        uploaded_file = st.file_uploader(
+            "Upload document", type=["pdf", "txt", "docx", "md"]
+        )
+        if st.button("Ingest File"):
+            if uploaded_file:
+                try:
+                    resp = requests.post(
+                        f"{API_URL}/ingest/file",
+                        files={"file": (uploaded_file.name, uploaded_file.getvalue(), uploaded_file.type)},
+                        timeout=60,
+                    )
+                    if resp.status_code == 200:
+                        st.success(f"Ingested {resp.json()['chunks_created']} chunks from {uploaded_file.name}!")
+                    else:
+                        st.error(f"Ingest failed: {resp.json().get('detail', 'unknown error')}")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+            else:
+                st.warning("Upload a file first.")
+
+    with text_tab:
+        ingest_text = st.text_area("Paste text to add to knowledge base", height=100)
+        ingest_source = st.text_input("Source name", value="manual_input")
+        if st.button("Ingest Text"):
+            if ingest_text.strip():
+                try:
+                    resp = requests.post(
+                        f"{API_URL}/ingest/text",
+                        json={"text": ingest_text, "source_name": ingest_source},
+                        timeout=30,
+                    )
+                    if resp.status_code == 200:
+                        st.success(f"Ingested {resp.json()['chunks_created']} chunks!")
+                    else:
+                        st.error("Ingest failed")
+                except Exception as e:
+                    st.error(f"Error: {e}")
+            else:
+                st.warning("Please enter some text first.")
 
 # ── Chat history ───────────────────────────────────────────────────
 if "messages" not in st.session_state:
@@ -90,26 +117,39 @@ for msg in st.session_state.messages:
         st.markdown(msg["content"])
         if msg["role"] == "assistant" and "meta" in msg:
             meta = msg["meta"]
-            with st.expander("📎 Sources & Details"):
-                col1, col2, col3 = st.columns(3)
-                col1.metric("Chunks retrieved", meta["retrieved_chunks"])
-                col2.metric("PII in query", "Yes" if meta["input_pii"] else "No")
-                col3.metric("PII in response", "Yes" if meta["output_pii"] else "No")
+            if meta.get("mode") == "agentic":
+                with st.expander("🤖 Agent Details"):
+                    col1, col2 = st.columns(2)
+                    col1.metric("PII in query", "Yes" if meta["input_pii"] else "No")
+                    col2.metric("PII in response", "Yes" if meta["output_pii"] else "No")
+                    if meta.get("tool_calls"):
+                        st.subheader("Tools used")
+                        for tc in meta["tool_calls"]:
+                            st.markdown(f"**{tc['tool']}** — args: `{tc['args']}`")
+                            st.caption(tc["result_preview"])
+                    if meta["input_pii_entities"]:
+                        st.warning(f"PII in query: {[e['entity_type'] for e in meta['input_pii_entities']]}")
+            else:
+                with st.expander("📎 Sources & Details"):
+                    col1, col2, col3 = st.columns(3)
+                    col1.metric("Chunks retrieved", meta["retrieved_chunks"])
+                    col2.metric("PII in query", "Yes" if meta["input_pii"] else "No")
+                    col3.metric("PII in response", "Yes" if meta["output_pii"] else "No")
 
-                if meta["sources"]:
-                    st.subheader("Source documents")
-                    for i, src in enumerate(meta["sources"], 1):
-                        st.markdown(
-                            f"**{i}. {src['metadata'].get('source', 'unknown')}** "
-                            f"— relevance: `{src['relevance_score']}`"
+                    if meta["sources"]:
+                        st.subheader("Source documents")
+                        for i, src in enumerate(meta["sources"], 1):
+                            st.markdown(
+                                f"**{i}. {src['metadata'].get('source', 'unknown')}** "
+                                f"— relevance: `{src['relevance_score']}`"
+                            )
+                            st.caption(src["content_preview"])
+
+                    if meta["input_pii_entities"]:
+                        st.warning(
+                            f"PII detected in your query: "
+                            f"{[e['entity_type'] for e in meta['input_pii_entities']]}"
                         )
-                        st.caption(src["content_preview"])
-
-                if meta["input_pii_entities"]:
-                    st.warning(
-                        f"PII detected in your query: "
-                        f"{[e['entity_type'] for e in meta['input_pii_entities']]}"
-                    )
 
 # ── Query input ────────────────────────────────────────────────────
 if prompt := st.chat_input("Ask a question about your documents..."):
@@ -121,55 +161,84 @@ if prompt := st.chat_input("Ask a question about your documents..."):
 
     # Call API
     with st.chat_message("assistant"):
-        with st.spinner("Thinking..."):
+        spinner_msg = "Agent thinking..." if agentic_mode else "Thinking..."
+        with st.spinner(spinner_msg):
             try:
-                resp = requests.post(
-                    f"{API_URL}/query",
-                    json={
-                        "query": prompt,
-                        "top_k": top_k,
-                        "score_threshold": score_threshold,
-                        "apply_guardrails": apply_guardrails,
-                    },
-                    timeout=120,
-                )
+                if agentic_mode:
+                    resp = requests.post(
+                        f"{API_URL}/agent/query",
+                        json={
+                            "query": prompt,
+                            "apply_guardrails": apply_guardrails,
+                        },
+                        timeout=120,
+                    )
+                else:
+                    resp = requests.post(
+                        f"{API_URL}/query",
+                        json={
+                            "query": prompt,
+                            "top_k": top_k,
+                            "score_threshold": score_threshold,
+                            "apply_guardrails": apply_guardrails,
+                        },
+                        timeout=120,
+                    )
 
                 if resp.status_code == 200:
                     data = resp.json()
                     answer = data["answer"]
                     st.markdown(answer)
 
-                    # Sources expander
-                    meta = {
-                        "retrieved_chunks": data["retrieved_chunks"],
-                        "input_pii": data["guardrails"]["input_pii_detected"],
-                        "output_pii": data["guardrails"]["output_pii_detected"],
-                        "input_pii_entities": data["guardrails"]["input_pii_entities"],
-                        "sources": data["source_documents"],
-                    }
+                    if agentic_mode:
+                        meta = {
+                            "mode": "agentic",
+                            "input_pii": data["guardrails"]["input_pii_detected"],
+                            "output_pii": data["guardrails"]["output_pii_detected"],
+                            "input_pii_entities": data["guardrails"]["input_pii_entities"],
+                            "tool_calls": data["tool_calls"],
+                        }
+                        with st.expander("🤖 Agent Details"):
+                            col1, col2 = st.columns(2)
+                            col1.metric("PII in query", "Yes" if meta["input_pii"] else "No")
+                            col2.metric("PII in response", "Yes" if meta["output_pii"] else "No")
+                            if meta["tool_calls"]:
+                                st.subheader("Tools used")
+                                for tc in meta["tool_calls"]:
+                                    st.markdown(f"**{tc['tool']}** — args: `{tc['args']}`")
+                                    st.caption(tc["result_preview"])
+                            if meta["input_pii_entities"]:
+                                st.warning(f"PII in query: {[e['entity_type'] for e in meta['input_pii_entities']]}")
+                    else:
+                        meta = {
+                            "mode": "standard",
+                            "retrieved_chunks": data["retrieved_chunks"],
+                            "input_pii": data["guardrails"]["input_pii_detected"],
+                            "output_pii": data["guardrails"]["output_pii_detected"],
+                            "input_pii_entities": data["guardrails"]["input_pii_entities"],
+                            "sources": data["source_documents"],
+                        }
+                        with st.expander("📎 Sources & Details"):
+                            col1, col2, col3 = st.columns(3)
+                            col1.metric("Chunks retrieved", meta["retrieved_chunks"])
+                            col2.metric("PII in query", "Yes" if meta["input_pii"] else "No")
+                            col3.metric("PII in response", "Yes" if meta["output_pii"] else "No")
 
-                    with st.expander("📎 Sources & Details"):
-                        col1, col2, col3 = st.columns(3)
-                        col1.metric("Chunks retrieved", meta["retrieved_chunks"])
-                        col2.metric("PII in query", "Yes" if meta["input_pii"] else "No")
-                        col3.metric("PII in response", "Yes" if meta["output_pii"] else "No")
+                            if meta["sources"]:
+                                st.subheader("Source documents")
+                                for i, src in enumerate(meta["sources"], 1):
+                                    st.markdown(
+                                        f"**{i}. {src['metadata'].get('source', 'unknown')}** "
+                                        f"— relevance: `{src['relevance_score']}`"
+                                    )
+                                    st.caption(src["content_preview"])
 
-                        if meta["sources"]:
-                            st.subheader("Source documents")
-                            for i, src in enumerate(meta["sources"], 1):
-                                st.markdown(
-                                    f"**{i}. {src['metadata'].get('source', 'unknown')}** "
-                                    f"— relevance: `{src['relevance_score']}`"
+                            if meta["input_pii_entities"]:
+                                st.warning(
+                                    f"PII detected in your query: "
+                                    f"{[e['entity_type'] for e in meta['input_pii_entities']]}"
                                 )
-                                st.caption(src["content_preview"])
 
-                        if meta["input_pii_entities"]:
-                            st.warning(
-                                f"PII detected in your query: "
-                                f"{[e['entity_type'] for e in meta['input_pii_entities']]}"
-                            )
-
-                    # Save to history
                     st.session_state.messages.append({
                         "role": "assistant",
                         "content": answer,
@@ -183,6 +252,6 @@ if prompt := st.chat_input("Ask a question about your documents..."):
             except requests.exceptions.ConnectionError:
                 st.error("Cannot reach API. Start it with: python -m api.main")
             except requests.exceptions.Timeout:
-                st.error("Request timed out. Llama may be slow — try again.")
+                st.error("Request timed out. Try again.")
             except Exception as e:
                 st.error(f"Unexpected error: {e}")

@@ -34,5 +34,9 @@ python-multipart==0.0.12
 # ── Feature 13: UI ────────────────────────────────────
 streamlit==1.41.1
 
+# ── Agentic RAG (raw Gemini tool-calling + web search) ───────────────
+google-generativeai>=0.8.0
+duckduckgo-search>=6.0.0
+
 # ── Testing (all features) ────────────────────────────
 pytest==8.3.3
